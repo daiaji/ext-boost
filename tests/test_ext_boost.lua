@@ -1,23 +1,30 @@
 -- tests/test_ext_boost.lua
 
--- 1. 路径配置：确保能加载 vendor 目录下的依赖
--- 模拟 CI 环境或本地开发环境的路径结构
-package.path = "vendor/lua-ext/?.lua;vendor/lua-ext/?/init.lua;" .. package.path
-package.path = "vendor/luaunit/?.lua;" .. package.path
-package.path = "./?.lua;./?/init.lua;" .. package.path
+-- 如果没有通过环境变量设置路径（本地手动运行时），尝试自动添加 vendor 路径
+if not os.getenv("LUA_PATH") then
+    package.path = "vendor/lua-ext/?.lua;vendor/lua-ext/?/init.lua;" .. package.path
+    package.path = "vendor/luaunit/?.lua;" .. package.path
+    -- 允许本地直接运行，找到 ./ext-boost/init.lua
+    package.path = "./?.lua;./?/init.lua;" .. package.path
+end
 
 local lu = require('luaunit')
 
 -- 尝试加载被测模块
 local status, ext = pcall(require, 'ext-boost')
+
 if not status then
-    error("无法加载 ext-boost。请确保 lua-ext submodule 已初始化且路径正确。\n错误信息: " .. tostring(ext))
+    print("\n[ERROR] 模块加载失败！")
+    print("当前的 package.path: " .. package.path)
+    error("\n无法加载 ext-boost。请检查 CI 配置或本地 submodule。\n错误详情: " .. tostring(ext))
 end
 
--- 辅助：用于比较 table 内容（忽略元表差异）
+-- ============================================================================
+-- 辅助函数
+-- ============================================================================
+
 local function assertTableEquals(actual, expected, msg)
     if type(actual) == 'table' and actual.toTable then actual = actual:toTable() end
-    -- 简单的解包重组，去除可能的自定义元表干扰，纯比较数据
     if type(actual) == 'table' then
         local t = {}
         for k,v in pairs(actual) do t[k] = v end
@@ -120,8 +127,8 @@ TestSet = {}
     function TestSet:testIntersection()
         local s_inter = self.s1 * self.s2
         lu.assertEquals(s_inter:len(), 2, "Set Inter Len")
-        lu.assertTrue(s_inter:contains('b'))
-        lu.assertTrue(s_inter:contains('c'))
+        lu.assertTrue(s_inter:contains('b'), "Inter contains b")
+        lu.assertTrue(s_inter:contains('c'), "Inter contains c")
     end
 
     function TestSet:testDifference()
@@ -261,7 +268,7 @@ TestPathIO = {}
     function TestPathIO:setUp()
         self.root_name = "test_temp_dir_unit"
         self.p_root = ext.path(self.root_name)
-        -- 清理之前残留
+        -- 清理之前可能残留的目录
         if self.p_root:isdir() then self.p_root:rmtree() end
     end
 
@@ -274,12 +281,14 @@ TestPathIO = {}
         local p_sub = self.p_root / "subdir"
         local p_file = p_sub / "test.txt"
 
+        -- 创建目录和文件
         ext.os.mkdir(p_sub.path, true)
         ext.io.writefile(p_file.path, "content")
 
         lu.assertTrue(p_sub:isdir(), "Dir Exists")
         lu.assertTrue(p_file:exists(), "File Exists")
 
+        -- 测试 Walk
         local walked_files = 0
         for root, dirs, files in self.p_root:walk() do
             walked_files = walked_files + #files
@@ -291,6 +300,7 @@ TestPathIO = {}
         lu.assertEquals(#flat_list, 1, "Walk Files Flat Count")
         lu.assertStrContains(flat_list[1].path, "test.txt", "Walk Files Flat Name")
 
+        -- 测试删除树
         self.p_root:rmtree()
         lu.assertIsFalse(self.p_root:exists(), "Rmtree verify")
     end

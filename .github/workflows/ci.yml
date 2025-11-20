@@ -15,14 +15,12 @@ jobs:
     
     env:
       LUAJIT_INSTALL_DIR: ${{ github.workspace }}\.luajit_bin
-      # 指向 vendor 目录下的 luajit2
       LUAJIT_SUBMODULE_PATH: vendor/luajit2
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # 必须递归拉取所有子模块 (lua-ext, luaunit, luajit2)
           submodules: 'recursive'
 
       - name: Setup MSVC environment
@@ -32,7 +30,6 @@ jobs:
         id: luajit-hash
         shell: pwsh
         run: |
-          # 获取 submodule 的 hash 用于缓存 key
           $submodule_hash = (git submodule status ${{ env.LUAJIT_SUBMODULE_PATH }}).Trim().Split(' ')[0]
           echo "hash=$submodule_hash" >> $env:GITHUB_OUTPUT
 
@@ -49,15 +46,10 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Building LuaJIT..."
-          # 开启 5.2 兼容模式（ext-boost 可能用到 pairs/ipairs 元方法等特性）
           $env:CL = "/DLUAJIT_ENABLE_LUA52COMPAT"
           .\msvcbuild.bat
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error::LuaJIT build failed!"
-            exit 1
-          }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
-          # 安装文件
           $install_dir = "${{ env.LUAJIT_INSTALL_DIR }}"
           New-Item -ItemType Directory -Path $install_dir -Force
           $lua_lib_dir = Join-Path $install_dir "lua"
@@ -65,24 +57,57 @@ jobs:
 
           Copy-Item -Path "luajit.exe", "lua51.dll", "lua51.lib" -Destination $install_dir
           Copy-Item -Path "luajit.exe" -Destination "$install_dir\lua.exe"
-          
-          $jit_source_path = Join-Path $PWD "jit"
-          Copy-Item -Path $jit_source_path -Destination $lua_lib_dir -Recurse
+          Copy-Item -Path "jit" -Destination $lua_lib_dir -Recurse
 
       - name: Add LuaJIT to PATH
         shell: pwsh
         run: |
           echo "${{ env.LUAJIT_INSTALL_DIR }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      
-      - name: Verify Environment
+
+      # === 新增步骤：整理测试依赖环境 ===
+      - name: Prepare Test Environment
         shell: pwsh
         run: |
-          luajit -v
-          if (Test-Path "vendor/luaunit/luaunit.lua") { Write-Host "LuaUnit found." } else { Write-Host "Missing LuaUnit!"; exit 1 }
-          if (Test-Path "vendor/lua-ext/ext.lua") { Write-Host "Lua-Ext found." } else { Write-Host "Missing Lua-Ext!"; exit 1 }
+          # 1. 创建统一的测试依赖目录
+          $test_deps = ".test_deps"
+          New-Item -ItemType Directory -Path $test_deps -Force
+
+          # 2. 复制 LuaUnit
+          Write-Host "Installing LuaUnit..."
+          Copy-Item "vendor/luaunit/luaunit.lua" -Destination $test_deps
+
+          # 3. 复制 Lua-Ext (注意：要复制其内容，包含 ext.lua 和 ext/ 文件夹)
+          Write-Host "Installing Lua-Ext..."
+          Copy-Item "vendor/lua-ext/*" -Destination $test_deps -Recurse -Force
+
+          # 4. 复制 Ext-Boost (本项目)
+          # 这确保了 require 'ext-boost' 能找到 .test_deps/ext-boost/init.lua
+          Write-Host "Installing Ext-Boost..."
+          $target = Join-Path $test_deps "ext-boost"
+          if (Test-Path "ext-boost") {
+             # 源代码在 ext-boost 文件夹内
+             Copy-Item "ext-boost" -Destination $test_deps -Recurse -Force
+          } else {
+             # 源代码在根目录 (扁平结构 fallback)
+             Write-Host "Source folder 'ext-boost' not found, creating from root files..."
+             New-Item -ItemType Directory -Path $target -Force
+             Copy-Item "*.lua" -Destination $target
+             # 移除测试脚本本身，防止无限递归
+             Remove-Item "$target/test_*.lua" -ErrorAction SilentlyContinue
+          }
+          
+          # 调试：打印目录结构
+          Write-Host "--- Dependency Tree ---"
+          Get-ChildItem $test_deps -Recurse | Select-Object FullName
 
       - name: Run Tests
         shell: pwsh
         run: |
-          # 运行测试脚本，-v 输出详细信息
+          # 设置 LUA_PATH 指向我们构建的 .test_deps 目录
+          # 注意 Windows 下的分隔符处理
+          $env:LUA_PATH = "$PWD/.test_deps/?.lua;$PWD/.test_deps/?/init.lua;;"
+          
+          Write-Host "LUA_PATH: $env:LUA_PATH"
+          
+          # 运行测试
           luajit tests/test_ext_boost.lua -v
